@@ -1,0 +1,356 @@
+---
+title: "RYM Scraper Aggregate Rating Analysis"
+author: "Spencer Miceli"
+date: "10/30/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+Those who frequent cataloging database sites are often presented with numerous pieces of information that are presented both for cataloging and for determining which new item to consume. One of such sites that I frequent is RateYourMusic. RateYourMusic (henceforth abbreviated to RYM) is a fantastic resource for anyone looking for new music, since it is one of the largest publicly available databases for music releases available. You can query their database (albeit in a limited fashion under their free model) to find new music releases to listen to. However, discussion in the community section or in online spaces outside of the website often claim that the general userbase has certain biases in their tastes that influence the aggregate rating of albums. This analysis hopes to discover whether claims about certain genres rating better or worse than average have any merits. There are two reasons for testing these claims:
+
+(1): Most discussions that make such broad generalizations lack any sort of data or research to back their claims, this report will hopefully act as reference for those who wish to engage in such conversations about RYM's general biases amongst its userbase.
+
+(2): Finding trends in the rating tendency of users will allow others to determine what a "better than average" album is for a particular genre. This will be useful since the querying functionality for those who are not subscribed is rather limited. Thus, acquiring an understanding of how different genres determine the aggregate rating of an album leads users to make better decisions when looking for new albums to consume. 
+
+Additionally, I hope that this report could inspire others to create their own analyses about the RYM platform. RYM has cracked down on the use of bots and scrapers and makes it extremely time-consuming to create any analysis. More individuals creating analyses could (hopefully) lead to stronger support for RYM to implement an API for their users. 
+
+## Background
+
+RYM users can rate albums using a 0.5 - 5.0 star scale by 0.5 star increments. These user ratings are then pooled together to create the Aggregate rating (denoted on RYM as the "RYM Rating") for a particular release. Users ratings are not a simple average, RYM applies weights to users based on how they use the site and how they rate albums in general. While this weighting is not explicitly indicated for any user, one can find their weighting by rating an album with a small number of ratings and seeing how the RYM rating adjusts upon their additional rating. The known weights for users are 0, 0.5, 1.0, and 1.25. These weightings and the hidden nature of the RYM Rating algorithm makes it difficult to create a formulaic model. 
+
+
+## Data Collection
+
+As of the time of writing this report, RYM currently has over 1.5 million unique artists, 4.8 million releases, and 92.7 million ratings by users. Scraping all of this information would not only take a large amount of time, but the strict enforcement of RYM's "no bots and scrapers" policy will result in very few albums being collected. In respect of RYM's policy, any albums that are to be analysed will have the HTML of the page manually downloaded. The information from the HTML will be scraped locally using Python.
+
+Opening any album release page will show what data is availiable to be scraped. For reference, here's RYM most popular release, OK Computer by Radiohead https://rateyourmusic.com/release/album/radiohead/ok-computer/. We see that much of the pertinent information about an album is displayed at the top of the page:
+
+* Album Title
+
+* Artist Name
+
+* Release Date (and Recorded Date if available)
+
+* RYM Aggregate Rating
+
+* Number of Ratings
+
+* Ranking
+
+* Genres (Primary and Secondary)
+
+* Descriptors
+
+Additionally, there is data on run time and credits. At the bottom of the page, we see information of the Rating Distribution (which is a histogram of user ratings for this particular album) and Rating Trend (how the Aggregate Rating has changed over time in years). 
+
+Of this information, Album Title, Artist Name, Release Date, RYM Aggregate Rating, Number of Ratings, Primary Genres, Secondary Genres, Descriptors, and Run Time were collected for analysis. These entries were used because almost all of them are non-empty and contain relevant information for this analysis and future analyses. 
+
+Since downloading 4.8 million releases is out of the question, strategic use of sampling must be employed to create a representative population. If we look at RYM's All-Time Popular Albums chart: [link]https://rateyourmusic.com/charts/popular/album/all-time/ we see that the maximum amount of albums displayed is 5000. Even at the 5000th most popular album, the number of ratings is over 2000. Sampling from this page will likely not be representative of the population of albums on RYM. Thus, alternate means of querying the charts needs to be investigated.
+
+Heading to the Genres section of RYM, [link]https://rateyourmusic.com/genres/ , we see that there are several umbrella genres that are presented (Ambient, Blues, Country, etc.) Navigating to any of these genres allows for access to querying charts by genre. The use of these umbrella genres will be useful in constructing a representative sample. On each of these umbrella terms, the total number of releases with the umbrella genre is given. This allows for sampling each umbrella genre's chart by its proportion in the total population.
+
+
+```{r warning=FALSE, message=FALSE}
+#import packages
+library(tidyverse)
+library(lubridate)
+library(magrittr)
+
+#set working directory
+setwd("D:\\Data sets and Coding Files\\RYM HTMLs\\Popular All-Time sample")
+
+name_genre <- c("Ambient", "Blues", "Classical Music", "Comedy", "Country", "Dance", "Electronic", 
+                "Experimental", "Field Recordings", "Folk", "Hip Hop", "Industrial Music", "Jazz",
+                "Metal", "Musical Theatre", "New Age", "Pop", "Psychedelia", "Punk", "R&B", "Regional Music",
+                "Rock", "Singer/Songwriter", "Ska", "Spoken Word")
+
+num_rel_genre <- c(47135, 17440, 87462, 12017, 42667, 233293, 340040,
+                   83860, 4616, 103118, 140191, 47823, 81121,
+                   218038, 6192, 7293, 328524, 43901, 159557, 75375, 216227,
+                   679668, 37908, 4476, 10677)
+
+(sample_df <- tibble(name_genre, num_rel_genre) %>% mutate(prop_rel_genre = num_rel_genre / sum(num_rel_genre)) )
+```
+
+Using this table, I will be manually downloading the HTML of albums within these genres at a proportion that will be approximately equal to its relative proportion given from RYM. So, we are prepared to download, but now we need to decide which albums to sample and how many to sample in total. 
+
+For sample size, we'll use power.t.test to calculate our sample size. We require:
+
+**delta:** the true difference in means
+
+**sd:** the standard deviation
+
+**sig.level:** alpha (Type 1 Error Probability)
+
+**power:** 1-beta (1 - Type II error Probability)
+
+After controlling significance level and power at 0.05 and 0.95 respectively, we must make some assumptions about the test. We want to be able to detect a difference of 0.10 in the means. Lastly, the standard deviation is unknown, so we'll make an initial assumption to conduct the sample size test. We'll assume for the test, that the mean population mean is 3.2 and the standard deviation is 0.4. This means that 95% of the data would lie roughly between 2.4 and 4.0. After collecting our initial sample, we will recalculate the power.t.test with our updated information. 
+
+
+```{r}
+# sample size calculation for genres
+power.t.test(n=NULL, delta = .10, sd = 0.4, sig.level = 0.05, power = .95)
+```
+
+We see from the power.t.test that a minimum sample size is 417. We'll strive to sample more than 417 in order to increase the power of the test. Thus, our initial sample will be 500 albums. Next, an algorithm is made to create a list of albums that will be used for random sampling that follows the observed proportions from RYM.
+
+
+If the overall number of albums within a genre is smaller than 40000, then the maximum number of albums changes to be less than 5000. Thus, a function that dynamically responds to the changes in the number of albums available for querying through the charts leads to the correct mapping for sampled values
+
+```{r}
+max_sample_observation <- function(value){
+  if(value < 40000){
+    return((value*0.04)%%40)
+  }
+  else
+    return(125)
+}
+```
+
+Create the sample of albums to be collected from RYM. The values created from the max_sample_observation function and this line of code returns a list of page numbers from which to sample to for each umbrella genre. Page number was chosen over actual album number on the chart in order to decrease the amount of time required for downloading the samples. 
+
+```{r warning=FALSE}
+(sampled_albums  <- as_tibble(sample(name_genre, 500, replace = TRUE, prob = sample_df$prop_rel_genre)) %>% 
+  rename(name_genre = value) %>% group_by(name_genre) %>% mutate(num = n()) %>%
+  left_join(sample_df, by = "name_genre") %>% 
+  mutate(max_sample = round(max_sample_observation(num_rel_genre))) %>% 
+  summarize(samp = list(sort(sample(1:round(max_sample), num, replace =TRUE))))
+)
+```
+
+A visualization to see how closely the sample follows the observed theoretical values from RYM.
+
+```{r}
+sampled_albums %>% left_join(sample_df, by = "name_genre") %>% mutate(rownum = row_number() ) %>%  
+  mutate(smpl_prop = unlist(lapply(sampled_albums$samp, length)) / 500) %>%  ggplot(aes(x=name_genre, y = prop_rel_genre)) +
+  geom_col(mapping = aes(fill = "theoretical"), width = .45, position = position_nudge(x=-0.225))+
+  geom_col(mapping = aes(y = smpl_prop, fill = "sampled"), width = .45, position = position_nudge(x=0.225))+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
+  labs(title = "Umbrella Genres by Sampled and Theoretical Observations",
+       x = "Name of Umbrella Genres",
+       y = "Relative Proportion")
+```
+
+Here we see that the sampled albums very closely follows the theoretical. Thus, with confidence that we are capturing a representative population, the manual process of downloading the HTMLs begins by following the page values given from sampled_albums and randomly selecting albums on that page. Each of the HTMLs are saved to a folder and are parsed using Python 3 and BeautifulSoup4 to a CSV file. The script for the scraper can be found within the GitHub repository for this analysis. 
+
+
+```{r echo = TRUE, results = 'hide'}
+#Useful code for manually downloading HTMLs
+apply(as.data.frame(c(seq(1,5000, by = 40)), as.character(c(seq(1,125)))) , 1, paste, collapse=" ")
+
+print((sampled_albums$samp))
+
+#capture.output(sampled_albums$samp, file = "D:\\Data sets and Coding Files\\RYM HTMLs\\rym population sample.csv")
+```
+
+
+## Data Cleaning
+
+Now that we have a CSV file with all of our parsed albums, we can begin our initial analysis on the population
+
+First, we'll load and clean the data provided by the HTML Scraper
+
+```{r}
+#import data from csv
+pop_ats <- as_tibble(read.csv("Popular All Time Sample.csv", header = FALSE, sep = ',', fill = TRUE))
+
+#rename columns
+names(pop_ats) <- c("artist", "album_title", "release_year", "rym_rating", "num_rating",
+                    "prim_genres", "sec_genres", "descriptors", "runtime")
+
+#Reformat columns with multiple values into lists
+(pop_ats %<>% mutate(prim_genres = as.list(strsplit(prim_genres, ":"))  ) %>% 
+            mutate(sec_genres = as.list(strsplit(sec_genres, ":"))  ) %>% 
+            mutate(descriptors = as.list(strsplit(descriptors, ":"))  ) 
+)
+```            
+
+Some of these list columns are empty, so they will be turned into NA's. 
+
+
+```{r warning=FALSE}
+#turn empty lists into NA's
+list_to_NA <- function(char_list){
+  for(i in 1:length(char_list)){
+    if(identical(char_list[[i]],character(0)))
+      char_list[i] = NA
+  }
+  return(char_list)
+}
+#reformat data to contain to list and NA's for empty strings
+#applied to descriptors, primary genres, and secondary genres
+pop_ats$prim_genres <- list_to_NA(pop_ats$prim_genres)
+pop_ats$sec_genres <- list_to_NA(pop_ats$sec_genres)
+pop_ats$descriptors <- list_to_NA(pop_ats$descriptors)
+```
+
+Change runtime to be a lubridate time object
+
+```{r}
+pop_ats$runtime<-ms(pop_ats$runtime[])
+```
+
+Create vecotrs of unique genres and descriptors to test against later
+
+```{r}
+descri_vec <- unique(unlist(pop_ats$descriptors))
+prim_genres_vec <- unique(unlist(pop_ats$prim_genres))
+sec_genres_vec <- unique(unlist(pop_ats$sec_genres))
+```
+
+## Exploratory Data Analysis
+
+In order to conduct our t-test, we need to check the summary statistics and the distribution of aggregate ratings
+
+```{r}
+pop_ats %>%
+  summarize(num = n(), rym_rating_median = median(rym_rating), rym_rating_mean = mean(rym_rating), 
+            rym_rating_sd = sd(rym_rating), num_rating_median = median(num_rating), 
+            num_rating_mean = mean(num_rating), num_rating_sd = sd(num_rating) )
+```
+```{r}
+pop_ats %>% ggplot()+
+  geom_histogram( binwidth = 0.10 , mapping = aes(x=rym_rating), color = "black", fill = "darkcyan")+
+  labs(title = "Histogram of RYM Rating",
+       x = "Average Rating",
+       y = "Total")
+
+pop_ats %>% ggplot()+
+  geom_qq(mapping = aes(sample=rym_rating), color = "black", size = 2)+
+  geom_qq_line(mapping = aes(sample=rym_rating), color = "cyan3", size = 1.5)+
+  labs(title = "QQ Plot of RYM Rating",
+       x = "Quantile",
+       y = "Average Rating")
+
+shapiro.test(pop_ats$rym_rating)
+```
+
+The histogram, QQ plot, and Shapiro-Wilk test show that RYM Ratings are not normally distributed.
+
+** Since we do not know the true distribution of the data and wish not to make any assumptions about the distribution, we'll use bootstrapping to estimate the standard error of the sample mean and sample standard deviation.
+
+```{r}
+library(boot)
+
+bootstrap_functions <- function(data, i){
+  d <- data[i ]
+  msd <- c(mean(d), sd(d))
+  return(msd) 
+}
+
+boo <- boot(pop_ats$rym_rating, statistic = bootstrap_functions, R = 10000)
+print(boo)
+plot(boo, index=2)
+boot.ci(boo, type ="basic")
+
+```
+Thus, on repeated sampling, 95% percent of samples will capture the true population mean between the bounds of 3.362 and 3.420. 
+
+## Comparing genres
+
+We'll start by comparing the population mean to the Electronic Dance Music (EDM) subgenre. EDM is often cited as a genre that underperforms on RYM, so we would like to test that claim. As such, the hypothesis test:
+
+Ho : The difference between the population RYM rating mean and the EDM RYM rating mean is zero.
+
+Ha : The difference between the population RYM rating mean and the EDM RYM rating mean is greater than zero.
+
+```{r}
+# sample size calculation for genres
+power.t.test(n=NULL, delta = .10, sd = 0.3148, sig.level = 0.05, power = .9, alternative = "one.sided")
+```
+
+Conducting a power.t.test to check for the minimum sample size for the test, we see that a minimum of 171 albums need to be collected. However, we know from the population sample that the distribution will likely not be normal. Thus, we will have to check to see whether the distribution is "close enough" to normal to conduct a t-test or if another method should be used, such as bootstrapping. 
+
+Now, we must sample from the EDM subgenre on RYM. Using similar code as previously. We will use a slightly higher sample size than 171, for potentially higher power and as a buffer in case some albums do not parse correctly.
+
+```{r}
+set.seed(626)
+EDM_sample <- as_tibble(sample(c(1:5000), 185, replace = FALSE)) %>% arrange(value)
+print(EDM_sample$value)
+```
+
+
+## Data Cleaning
+
+Now that we have a CSV file with all of our parsed albums, we can begin our initial analysis on the population
+
+First, we'll load and clean the data provided by the HTML Scraper
+
+```{r}
+setwd("D:\\Data sets and Coding Files\\RYM HTMLs\\EDM")
+#import data from csv
+edm_sample <- as_tibble(read.csv("EDM_sample.csv", header = FALSE, sep = ',', fill = TRUE))
+
+#rename columns
+names(edm_sample) <- c("artist", "album_title", "release_year", "rym_rating", "num_rating",
+                    "prim_genres", "sec_genres", "descriptors", "runtime")
+
+#Reformat columns with multiple values into lists
+(edm_sample %<>% mutate(prim_genres = as.list(strsplit(prim_genres, ":"))  ) %>% 
+            mutate(sec_genres = as.list(strsplit(sec_genres, ":"))  ) %>% 
+            mutate(descriptors = as.list(strsplit(descriptors, ":"))  ) 
+)
+
+#reformat data to contain to list and NA's for empty strings
+#applied to descriptors, primary genres, and secondary genres
+edm_sample$prim_genres <- list_to_NA(edm_sample$prim_genres)
+edm_sample$sec_genres <- list_to_NA(edm_sample$sec_genres)
+edm_sample$descriptors <- list_to_NA(edm_sample$descriptors)
+
+edm_sample$runtime<-ms(edm_sample$runtime[])
+```            
+
+```{r}
+edm_sample %>%
+  summarize(num = n(), rym_rating_median = median(rym_rating), rym_rating_mean = mean(rym_rating), 
+            rym_rating_sd = sd(rym_rating), num_rating_median = median(num_rating), 
+            num_rating_mean = mean(num_rating), num_rating_sd = sd(num_rating) )
+```
+```{r}
+edm_sample %>% ggplot()+
+  geom_histogram( binwidth = 0.10 , mapping = aes(x=rym_rating), color = "black", fill = "darkcyan")+
+  labs(title = "Histogram of RYM Rating",
+       x = "Average Rating",
+       y = "Total")
+
+edm_sample %>% ggplot()+
+  geom_qq(mapping = aes(sample=rym_rating), color = "black", size = 2)+
+  geom_qq_line(mapping = aes(sample=rym_rating), color = "cyan3", size = 1.5)+
+  labs(title = "QQ Plot of RYM Rating",
+       x = "Quantile",
+       y = "Average Rating")
+
+shapiro.test(edm_sample$rym_rating)
+```
+Similarly to our population sample, the data is non-normal. Since we have a large enough sample size, we can still conduct the t-test, as it is pretty robust to non-normal of the data.
+
+First, we must check the equality of variance to conduct the appropriate t-test. 
+
+```{r}
+var.test(unlist(pop_ats %>% select(rym_rating)), unlist(edm_sample %>% select(rym_rating)))
+```
+
+We see that the variances of our EDM sample and our population sample are equal. Thus, finally conducting the t-test to see whether the mean RYM ratings between the two samples differ:
+
+
+```{r}
+t.test(pop_ats %>% select(rym_rating), edm_sample %>% select(rym_rating), alternative = "greater", var.equal = TRUE)
+```
+
+With a p-value of 2.256e-14, we can see that there is a significant difference in the mean RYM Rating for EDM and the population sample. Specifically, this one-sided test proved that the mean RYM Rating is significantly less than that of the population mean RYM Rating. 
+
+
+## Discussion
+
+From this point, the process of analyzing how any particular genre compares to the population can be conducted. A random sample can be generated, HTML files can be downloaded then scraped, and a similar t-test approach can be implemented. Furthermore, there is more data that is collected from the scraping that can be used in analysis, such as descriptors, run time, and release year. 
+
+This is a project that I have a great interest in continuing analysis; however, the current methodology of collecting the samples is impractical for analyzing many genres. Therefore, The first step to creating a better workflow around this project would be to automate the collection of samples and albums data. Specifically, I envision either a further implementation of the Python scraper or an browser extension to be plausible products to collect data. A Python scraper may be feasible, but I worry about potential IP blocking. Thus, a browser extension may be a plausible answer to simplify the data collection process. In either scenario, further time and learning will be required to make these products feasible. 
+
+## Conclusion
+
+In this report, the foundational code and processes for analysis of RYM albums were implemented. We saw, by example, how the mean RYM Ratings of genres could be tested against the population sample and what steps could be taken to simplify the data collection process. I hope this report would inspire others to conduct similar analyses and reports, as I believe there is much to be learned from RYM.
